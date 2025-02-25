@@ -99,7 +99,15 @@ class SelfRefine:
         Returns:
             str: The refined text
         """
-        pass
+        messages = [
+            {"role": "system", "content": """You are an expert editor. Your task is to improve the given text 
+            based on the provided feedback. Make all necessary changes to address the feedback points while 
+            preserving the original intent and information. Provide a complete, refined version of the text."""},
+            {"role": "user", "content": f"Original text:\n\n{text}\n\nFeedback:\n\n{feedback}\n\nPlease provide a refined version of the text that addresses all the feedback points:"}
+        ]
+        
+        self.current_text = self._make_api_call(messages, temperature=0.7)
+        return self.current_text
     
     def iterate_refinement(self, iterations: int = 3) -> str:
         """
@@ -126,7 +134,11 @@ def main():
     """
     
     initial_text = refiner.generate_initial_text(prompt)
-    print(initial_text)
+    
+
+    final_text = refiner.iterate_refinement(iterations=3)
+    
+    print(final_text)
 
 
 if __name__ == "__main__":
