@@ -45,7 +45,7 @@ class SelfRefine:
         response = client.chat.completions.create(
             model=self.model,
             messages=messages,
-            max_tokens=16000,
+            max_tokens=1024,
             temperature=temperature
         )
         return response.choices[0].message.content.strip()
