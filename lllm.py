@@ -4,6 +4,8 @@ import os
 from typing import List, Dict, Any, Optional, Tuple
 from openai import OpenAI
 from dotenv import load_dotenv
+import unittest
+from unittest.mock import patch
 
 load_dotenv() 
 api_key = os.getenv("OPENAI_API_KEY")
@@ -81,7 +83,10 @@ class SelfRefine:
             Analyze the following text and provide specific, actionable feedback on how it can be improved.
             Focus on clarity, coherence, factual accuracy, and overall quality.
             Be detailed and point out specific issues along with suggestions for improvement.
-            Structure your feedback in bullet points, addressing different aspects of the text."""},
+            Structure your feedback in bullet points, addressing different aspects of the text.
+            If the text is already optimal and does not require any further improvements, 
+            please include the phrase 'No further improvements needed.' at the end of your feedback.
+            """},
             
             {"role": "user", "content": f"Please provide detailed feedback on the following text:\n\n{text}"}
         ]
@@ -119,8 +124,17 @@ class SelfRefine:
         Returns:
             str: The final refined text
         """
-        pass
+        for i in range(iterations):
+            feedback = self.get_feedback(self.current_text)
+            print(f"Feedback from iteration {i+1}:\n{feedback}\n")
 
+            if "no further improvements needed" in feedback.lower():
+                print("Model indicates no further refinements are necessary.")
+                break
+            self.current_text = self.refine_text(self.current_text, feedback)
+            print(f"Iteration {i+1} complete.\n")
+        
+        return self.current_text
 
 def main():
     """
@@ -134,12 +148,48 @@ def main():
     """
     
     initial_text = refiner.generate_initial_text(prompt)
-    
-
     final_text = refiner.iterate_refinement(iterations=3)
     
-    print(final_text)
+    print(f'Final refined text: {final_text}')
 
 
 if __name__ == "__main__":
     main()
+
+    # Mock Test
+    # unittest.main()
+
+
+# Mock Test
+class TestSelfRefine(unittest.TestCase):
+    @patch.object(SelfRefine, '_make_api_call')
+    def test_full_process(self, mock_api_call):
+        """
+        Test the entire refinement process by mocking API responses at every step.
+        """
+        prompt = """
+        Write a comprehensive explanation of how neural networks learn through backpropagation.
+        Target audience is undergraduate students with basic knowledge of calculus.
+        """
+        # Mock API responses in sequence:
+        # 1. Generate initial text
+        # 2. Get feedback (iteration 1)
+        # 3. Refine text (iteration 1)
+        # 4. Get feedback (iteration 2)
+        mock_api_call.side_effect = [
+            "Initial text: Data preprocessing is important for machine learning because it helps to clean and prepare the data for the algorithm.",
+            "• Clarify the importance of feature scaling.\n• Provide an example.",
+            "Refined text version 1: Data preprocessing is crucial in machine learning because it helps clean the data and prepares it for algorithms. Feature scaling is especially important for algorithms sensitive to input data scale.",
+            "No further improvements needed."
+        ]
+
+        refiner = SelfRefine(model="gpt-4o-mini")
+        generated_text = refiner.generate_initial_text(prompt)
+        self.assertEqual(generated_text, "Initial text: Data preprocessing is important for machine learning because it helps to clean and prepare the data for the algorithm.")
+
+        final_text = refiner.iterate_refinement(iterations=3)
+
+        self.assertEqual(final_text, "Refined text version 1: Data preprocessing is crucial in machine learning because it helps clean the data and prepares it for algorithms. Feature scaling is especially important for algorithms sensitive to input data scale.")
+        self.assertEqual(mock_api_call.call_count, 4) 
+        print(f"Final refined text: {final_text}")
+
