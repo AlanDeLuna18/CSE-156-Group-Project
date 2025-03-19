@@ -43,7 +43,8 @@ class SelfRefine:
         self.refinement_history = []  #Will store all versions of the text during refinement
         self.original_prompt = ""  #Will store the original prompt
     
-    def _make_api_call(self, messages: List[Dict[str, str]], temperature: float = 0.7) -> str:
+    def _make_api_call(self, messages: List[Dict[str, str]], temperature: float = 0.7, 
+                       override_model: str = None) -> str:
         """
         Make an API call to the OpenAI GPT model.
         
@@ -55,18 +56,28 @@ class SelfRefine:
             temperature (float): Controls randomness in the output (0.0-1.0)
                                 Lower values make output more deterministic and focused
                                 Higher values make output more creative and diverse
+            override_model (str): If provided, uses this model instead of the default model
             
         Returns:
             str: The response text from the API (stripped of leading/trailing whitespace)
         """
-        #Call the OpenAI API with the specified parameters
-        response = client.chat.completions.create(
-            model=self.model,  #Use the model specified in the constructor
-            messages=messages,  #The conversation context to send to the API
-            max_tokens=4096,  #Maximum length of the response
-            temperature=temperature  #Controls randomness/creativity of the response
-        )
-        #Extract and return just the text content from the response
+        # Determine which model to use
+        model_to_use = override_model if override_model else self.model
+        
+        # Prepare the API call parameters
+        api_params = {
+            "model": model_to_use,
+            "messages": messages
+        }
+        
+        # Add optional parameters if provided (only if not using o3-mini model)
+        if temperature is not None and "o3" not in model_to_use:
+            api_params["temperature"] = temperature
+            
+        # Call the OpenAI API with the specified parameters
+        response = client.chat.completions.create(**api_params)
+        
+        # Extract and return just the text content from the response
         return response.choices[0].message.content.strip()
     
     def generate_initial_text(self, prompt: str) -> str:
@@ -100,7 +111,7 @@ class SelfRefine:
         self.refinement_history = [self.current_text]
         return self.current_text
     
-    def get_feedback(self, text: str, temperature: float = 0.7) -> str:
+    def get_feedback(self, text: str, temperature: float = None) -> str:
         """
         Get feedback on the current text using an API call, referencing the original prompt.
         
@@ -115,41 +126,51 @@ class SelfRefine:
         Returns:
             str: The feedback on the text from the model
         """
-        #Prepare the messages for the API call
-        #The system message instructs the model on how to provide feedback
+        #Prepare the prompt for the API call
+        prompt = f"""You are a critical reviewer providing constructive feedback. 
+        Analyze the following text based on how well it addresses the original prompt.
+        Provide specific, actionable feedback on how it can be improved to better fulfill the requirements
+        and intent of the original prompt.
+        
+        Focus on:
+        1. How well the text addresses all aspects of the prompt
+        2. Clarity, coherence, and relevance to the prompt
+        3. Factual accuracy and overall quality
+        4. Any missing information that would better satisfy the prompt
+        
+        If the text is already factually correct and fully addresses the prompt, clearly state 
+        'No further improvements needed' at the beginning of your feedback.
+        
+        Only suggest changes if they would genuinely improve the text. For factual questions with 
+        definitive answers, prioritize accuracy over stylistic changes.
+        
+        Structure your feedback in bullet points, addressing different aspects of the text.
+        
+        Original prompt:
+        {self.original_prompt}
+        
+        Text to review:
+        {text}
+        
+        Please provide detailed feedback on how well this text addresses the original prompt:
+        """
+        
+        #Make the API call to get feedback with o3-mini model
         messages = [
-            {"role": "system", "content": """You are a critical reviewer providing constructive feedback. 
-            Analyze the following text based on how well it addresses the original prompt.
-            Provide specific, actionable feedback on how it can be improved to better fulfill the requirements
-            and intent of the original prompt.
-            
-            Focus on:
-            1. How well the text addresses all aspects of the prompt
-            2. Clarity, coherence, and relevance to the prompt
-            3. Factual accuracy and overall quality
-            4. Any missing information that would better satisfy the prompt
-            
-            If the text is already factually correct and fully addresses the prompt, clearly state 
-            'No further improvements needed' at the beginning of your feedback.
-            
-            Only suggest changes if they would genuinely improve the text. For factual questions with 
-            definitive answers, prioritize accuracy over stylistic changes.
-            
-            Structure your feedback in bullet points, addressing different aspects of the text.
-            """}, 
-            
-            #The user message provides the original prompt and the text to review
-            {"role": "user", "content": 
-             f"Original prompt:\n\n{self.original_prompt}\n\nText to review:\n\n{text}\n\nPlease provide detailed feedback on how well this text addresses the original prompt:"}
+            {"role": "user", "content": prompt}
         ]
         
-        #Make the API call to get feedback
-        feedback = self._make_api_call(messages, temperature=temperature)
+        feedback = self._make_api_call(
+            messages,
+            temperature=temperature,
+            override_model="o3-mini"
+        )
+        
         #Add the feedback to the history
         self.feedback_history.append(feedback)
         return feedback
 
-    def refine_text(self, text: str, feedback: str, temperature: float = 0.7) -> str:
+    def refine_text(self, text: str, feedback: str, temperature: float = None) -> str:
         """
         Refine the text based on feedback using an API call, with reference to the original prompt.
         
@@ -165,31 +186,45 @@ class SelfRefine:
         Returns:
             str: The refined text from the model
         """
-        #Prepare the messages for the API call
-        #The system message instructs the model on how to refine the text
+        #Prepare the prompt for the API call
+        prompt = f"""You are an expert editor. Your task is to improve the given text 
+        based on the provided feedback and the original prompt, ONLY if improvements are needed.
+        
+        If the feedback indicates 'No further improvements needed' or if you determine the text is already 
+        optimal, you may return it unchanged. Otherwise, address the feedback points to better fulfill the 
+        requirements of the original prompt.
+        
+        Prioritize factual accuracy over stylistic changes, especially for questions with definitive answers.
+        
+        Make changes that:
+        1. Address valid points in the feedback
+        2. Better fulfill the requirements of the original prompt
+        3. Ensure the text is fully responsive to what was asked for
+        
+        If you determine no changes are needed, return the original text.
+        
+        Original prompt:
+        {self.original_prompt}
+        
+        Original text:
+        {text}
+        
+        Feedback:
+        {feedback}
+        
+        Please provide a refined version of the text that addresses valid feedback points and better fulfills the original prompt:
+        """
+        
+        #Make the API call to refine the text (using the default model - gpt-4o-mini)
         messages = [
-            {"role": "system", "content": """You are an expert editor. Your task is to improve the given text 
-            based on the provided feedback and the original prompt, ONLY if improvements are needed.
-            
-            If the feedback indicates 'No further improvements needed' or if you determine the text is already 
-            optimal, you may return it unchanged. Otherwise, address the feedback points to better fulfill the 
-            requirements of the original prompt.
-            
-            Prioritize factual accuracy over stylistic changes, especially for questions with definitive answers.
-            
-            Make changes that:
-            1. Address valid points in the feedback
-            2. Better fulfill the requirements of the original prompt
-            3. Ensure the text is fully responsive to what was asked for
-            
-            If you determine no changes are needed, return the original text.
-            """},
-            #The user message  provides the original prompt, the text to refine, and the feedback
-            {"role": "user", "content": f"Original prompt:\n\n{self.original_prompt}\n\nOriginal text:\n\n{text}\n\nFeedback:\n\n{feedback}\n\nPlease provide a refined version of the text that addresses valid feedback points and better fulfills the original prompt:"}
+            {"role": "user", "content": prompt}
         ]
         
-        #Make the API call to refine the text
-        refined_text = self._make_api_call(messages, temperature=temperature)
+        refined_text = self._make_api_call(
+            messages,
+            temperature=temperature
+        )
+        
         #Update the current text with the refined version
         self.current_text = refined_text
         #Add the refined text to the history
@@ -213,8 +248,8 @@ class SelfRefine:
         """
         for i in range(iterations):
             #Step 1: Get feedback on the current text
-            #Use lower temperature for feedback to reduce randomness and get more consistent feedback
-            feedback = self.get_feedback(self.current_text, temperature=0.5)
+            #Use None for temperature to allow using the reasoning_effort parameter
+            feedback = self.get_feedback(self.current_text, temperature=None)
 
             #Step 2: Check if no improvements are needed
             #If the feedback indicates the text is already optimal, stop the refinement process
@@ -226,8 +261,8 @@ class SelfRefine:
             previous_text = self.current_text
             
             #Step 3: Refine the text based on the feedback
-            #Use lower temperature for refinement to reduce randomness and focus on addressing feedback
-            self.current_text = self.refine_text(self.current_text, feedback, temperature=0.5)
+            #Use None for temperature to allow using the reasoning_effort parameter
+            self.current_text = self.refine_text(self.current_text, feedback, temperature=None)
             
             #Step 4: Check if the text changed after refinement
             #If the text didn't change, it's likely already optimal, so stop the refinement process
@@ -237,22 +272,37 @@ class SelfRefine:
             
             #Step 5: Validate the refinement to ensure it improved rather than degraded the text
             #This is a quality control step to prevent the refinement from making the text worse
-            validation_messages = [
-                {"role": "system", "content": """You are a validation expert. Compare the original and refined texts 
-                based on factual accuracy, completeness, and alignment with the original prompt.
-                
-                Determine if the refinement has improved the text or made it worse.
-                
-                Return ONLY one of these verdicts:
-                "IMPROVED" - if the refinement is better than the original
-                "WORSE" - if the refinement introduced errors or is worse than the original
-                """},
-                {"role": "user", "content": f"Original prompt:\n\n{self.original_prompt}\n\nOriginal text:\n\n{previous_text}\n\nRefined text:\n\n{self.current_text}\n\nIs the refined text better or worse than the original?"}
-            ]
+            validation_prompt = f"""You are a validation expert. Compare the original and refined texts 
+            based on factual accuracy, completeness, and alignment with the original prompt.
+            
+            Determine if the refinement has improved the text or made it worse.
+            
+            Return ONLY one of these verdicts:
+            "IMPROVED" - if the refinement is better than the original
+            "WORSE" - if the refinement introduced errors or is worse than the original
+            
+            Original prompt:
+            {self.original_prompt}
+            
+            Original text:
+            {previous_text}
+            
+            Refined text:
+            {self.current_text}
+            
+            Is the refined text better or worse than the original?
+            """
             
             #Make the API call to validate the refinement
-            #Use very low temperature (0.3) for validation to get more consistent results
-            validation = self._make_api_call(validation_messages, temperature=0.3)
+            validation_messages = [
+                {"role": "user", "content": validation_prompt}
+            ]
+            
+            validation = self._make_api_call(
+                validation_messages, 
+                temperature=None,
+                override_model="o3-mini"
+            )
             
             #Step 6: Revert to previous version if the refinement made the text worse
             if "worse" in validation.lower():
