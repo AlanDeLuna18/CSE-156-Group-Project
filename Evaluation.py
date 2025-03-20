@@ -4,11 +4,33 @@ import numpy as np
 from openai import OpenAI
 from tqdm import tqdm
 from dotenv import load_dotenv
+from pydantic import BaseModel, Field
+from typing import Dict, List, Optional
 import json
 
 # Load API key from environment variables
 load_dotenv()
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+# Pydantic models for structured output
+class ScoreExplanation(BaseModel):
+    correctness: str
+    reasoning_quality: str
+    completeness: str
+
+class Scores(BaseModel):
+    correctness: int
+    reasoning_quality: int
+    completeness: int
+
+class ModelEvaluation(BaseModel):
+    scores: Scores
+    explanations: ScoreExplanation
+
+class EvaluationResult(BaseModel):
+    evaluations: Dict[str, ModelEvaluation]
+    best_model: str
+    explanation: str
 
 class Evaluator:
     def __init__(self, evaluator_model="gpt-4o", temperature=0.0):
@@ -28,13 +50,14 @@ class Evaluator:
         # Create prompt for each question
         results = []
         for i, row in tqdm(df.iterrows(), total=len(df), desc="Evaluating model pairs"):
-            question = row['question']
+            question = row['Question']
             correct_answer = row['Correct Answer']
             model1_answer = row[model1_col]
             model2_answer = row[model2_col]
             
-            # Create evaluation prompt
-            prompt = f"""You are evaluating model responses to a technical/academic question.
+            # Create evaluation prompt with JSON instruction
+            system_message = "You are an impartial academic evaluator skilled in technical subjects. Provide your evaluation in JSON format."
+            user_message = f"""You are evaluating model responses to a technical/academic question.
                     QUESTION:
                     {question}
 
@@ -70,68 +93,81 @@ class Evaluator:
                    
                     Include a brief explanation for each score in one sentence.
                     Then, determine which model answer is best overall and explain why in one sentence.
-
-                    Format your response as a JSON object with this structure:
+                    
+                    Return your evaluation in JSON format with the following structure:
                     {{
                       "evaluations": {{
                         "{model1_name}": {{
                           "scores": {{
-                            "correctness": score,
-                            "reasoning_quality": score,
-                            "completeness": score
+                            "correctness": <score>,
+                            "reasoning_quality": <score>,
+                            "completeness": <score>
                           }},
                           "explanations": {{
-                            "correctness": "explanation",
-                            "reasoning_quality": "explanation",
-                            "completeness": "explanation"
+                            "correctness": "<explanation>",
+                            "reasoning_quality": "<explanation>",
+                            "completeness": "<explanation>"
                           }}
                         }},
                         "{model2_name}": {{
                           "scores": {{
-                            "correctness": score,
-                            "reasoning_quality": score,
-                            "completeness": score
+                            "correctness": <score>,
+                            "reasoning_quality": <score>,
+                            "completeness": <score>
                           }},
                           "explanations": {{
-                            "correctness": "explanation",
-                            "reasoning_quality": "explanation",
-                            "completeness": "explanation"
+                            "correctness": "<explanation>",
+                            "reasoning_quality": "<explanation>",
+                            "completeness": "<explanation>"
                           }}
                         }}
                       }},
-                      "best_model": "model_name",
-                      "explanation": "reason why this model performed best"
+                      "best_model": "<model_name>",
+                      "explanation": "<reason why this model performed best>"
                     }}
                     """
             
-            # Make API Call
-            messages = [
-                {"role": "system", "content": "You are an impartial academic evaluator skilled in technical subjects."},
-                {"role": "user", "content": prompt}
-            ]
-            
-            response = client.chat.completions.create(
-                model=self.evaluator_model,
-                messages=messages,
-                temperature=self.temperature
-            )
-            
-            evaluation = response.choices[0].message.content.strip()
-            
-            # Store in results
+            # Make API Call with JSON output format
             try:
-                evaluation_data = json.loads(evaluation)
-                if "best_model" in evaluation_data:
+                response = client.chat.completions.create(
+                    model=self.evaluator_model,
+                    messages=[
+                        {"role": "system", "content": system_message},
+                        {"role": "user", "content": user_message}
+                    ],
+                    temperature=self.temperature,
+                    response_format={"type": "json_object"}
+                )
+                
+                # Parse the JSON response
+                evaluation_json = response.choices[0].message.content
+                evaluation_data = json.loads(evaluation_json)
+                
+                # Validate against our expected structure
+                try:
+                    # Manually validate the structure
+                    EvaluationResult.model_validate(evaluation_data)
+                    
+                    # Add metadata
+                    evaluation_data["question_idx"] = i
+                    evaluation_data["question"] = question
                     evaluation_data["best_model"] = evaluation_data["best_model"].lower()
-                evaluation_data["question_idx"] = i
-                evaluation_data["question"] = question
-                results.append(evaluation_data)
-            except json.JSONDecodeError:
-                print(f"Failed to parse evaluation as JSON for question {i}. Using raw text.")
+                    results.append(evaluation_data)
+                except Exception as e:
+                    print(f"Validation error for question {i}: {e}")
+                    results.append({
+                        "question_idx": i,
+                        "question": question,
+                        "raw_evaluation": evaluation_data,
+                        "validation_error": str(e)
+                    })
+                
+            except Exception as e:
+                print(f"Error processing question {i}: {e}")
                 results.append({
                     "question_idx": i,
                     "question": question,
-                    "raw_evaluation": evaluation
+                    "error": str(e)
                 })
         
         # Save results
@@ -148,7 +184,6 @@ class Evaluator:
         return results, summary
     
     def _generate_summary(self, evaluation_results, model1_name, model2_name):
-
         criteria = ["correctness", "reasoning_quality", "completeness"]
         
         # Initialize summary
@@ -171,8 +206,9 @@ class Evaluator:
                 for model in [model1_name, model2_name]:
                     model_key = model.lower()
                     for criterion in criteria:
-                        score = result["evaluations"][model_key]["scores"][criterion]
-                        summary["scores"][model_key][criterion].append(score)
+                        if model_key in result["evaluations"] and "scores" in result["evaluations"][model_key]:
+                            score = result["evaluations"][model_key]["scores"][criterion]
+                            summary["scores"][model_key][criterion].append(score)
         
         # Calculate averages
         for model in [model1_name, model2_name]:
@@ -186,7 +222,6 @@ class Evaluator:
                     
             summary["averages"][model] = {
                 "overall": sum(model_avg_scores.values()) / len(model_avg_scores),
-                # "win_percentage": (summary["wins"][model] / len(evaluation_results)) * 100 if evaluation_results else 0
             }
         
         # Determine overall winner
@@ -196,6 +231,14 @@ class Evaluator:
             summary["overall_winner"] = model2_name
         else:
             summary["overall_winner"] = "tie"
+        
+        # Calculate total points
+        summary["total_points"] = {}
+        for model in summary["models"]:
+            total = 0
+            for criterion in criteria:
+                total += sum(summary["scores"][model][criterion])
+            summary["total_points"][model] = total
         
         return summary
 
@@ -211,6 +254,17 @@ if __name__ == "__main__":
     
     print(f"Evaluation complete. Results saved to comparison_results/")
     print(f"Overall winner: {summary['overall_winner']}")
+    
+    # Print the win counts for each model
+    print(f"Win counts:")
+    for model in summary["models"]:
+        print(f"  {model}: {summary['wins'][model]} questions")
+    
+    # Print total points
+    print(f"Total points:")
+    for model in summary["models"]:
+        print(f"  {model}: {summary['total_points'][model]}")
+    
     print(f"Average scores:")
     for model in summary["models"]:
         print(f"  {model}: {summary['averages'][model]['overall']:.2f}")
